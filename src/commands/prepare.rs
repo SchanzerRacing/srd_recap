@@ -4,12 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{
-    CommandOutcome,
-    cli::PrepareArgs,
-    discovery,
-    mcap_cli::McapCli,
-};
+use crate::{CommandOutcome, cli::PrepareArgs, discovery, mcap_cli::McapCli};
 
 pub fn run(args: PrepareArgs, mcap: &impl McapCli) -> Result<CommandOutcome> {
     let input_dir = args

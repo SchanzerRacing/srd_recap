@@ -17,8 +17,12 @@ pub enum CommandOutcome {
 fn run() -> Result<CommandOutcome> {
     let cli = Cli::parse();
 
+    let mcap = mcap_cli::RealMcapCli {
+        verbose: cli.verbose > 0,
+    };
+
     match cli.command {
-        Commands::Prepare(args) => commands::prepare::run(args, &mcap_cli::RealMcapCli),
+        Commands::Prepare(args) => commands::prepare::run(args, &mcap),
         Commands::Analyze(args) => commands::analyze::run(args),
         Commands::Upload(args) => commands::upload::run(args),
     }

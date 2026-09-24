@@ -14,7 +14,7 @@ pub struct Cli {
     pub command: Commands,
 
     /// Verbose output
-    #[arg(short, long, action = clap::ArgAction::Count)]
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 }
 

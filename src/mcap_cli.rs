@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use std::{
     path::{Path, PathBuf},
-    process::{Command, ExitStatus},
+    process::{Command, ExitStatus, Stdio},
 };
 
 pub trait McapCli {
@@ -11,13 +11,21 @@ pub trait McapCli {
     fn has_messages(&self, file: &Path) -> Result<bool>;
 }
 
-pub struct RealMcapCli;
+pub struct RealMcapCli {
+    pub verbose: bool,
+}
 
 impl McapCli for RealMcapCli {
     fn doctor(&self, file: &Path) -> Result<ExitStatus> {
-        Command::new("mcap")
-            .arg("doctor")
-            .arg(file)
+        let mut command = Command::new("mcap");
+        command.arg("doctor").arg(file);
+
+        if !self.verbose {
+            command.stdout(Stdio::null());
+            command.stderr(Stdio::null());
+        }
+
+        command
             .status()
             .with_context(|| format!("Could not run mcap doctor for {}", file.display()))
     }
