@@ -1,36 +1,39 @@
+use anyhow::{Context, Result, bail, ensure};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
-use crate::CommandOutcome;
-use crate::cli::PrepareArgs;
-use crate::discovery;
-use anyhow::{Result, ensure};
+use crate::{CommandOutcome, cli::PrepareArgs, discovery, mcap_cli};
 
 pub fn run(args: PrepareArgs) -> Result<CommandOutcome> {
-    let input_dir = args.input_dir.canonicalize()?;
-    let recovered_dir = PathBuf::from("recovered").canonicalize()?;
-    let merged_dir = args
-        .output_dir
-        .unwrap_or_else(|| PathBuf::from("merged"))
-        .canonicalize()?;
+    let input_dir = args
+        .input_dir
+        .canonicalize()
+        .context("Could not resolve the input directory")?;
+
+    ensure!(input_dir.is_dir(), "Input must be a directory");
+
+    let recovered_dir = PathBuf::from("recovered");
+    let merged_dir = args.output_dir.unwrap_or_else(|| PathBuf::from("merged"));
 
     fs::create_dir_all(&recovered_dir)?;
     fs::create_dir_all(&merged_dir)?;
 
+    let recovered_dir = recovered_dir.canonicalize()?;
+    let merged_dir = merged_dir.canonicalize()?;
+
     ensure!(
-        !input_dir.starts_with(&recovered_dir)
-            && !input_dir.starts_with(&merged_dir)
-            && !recovered_dir.starts_with(&merged_dir)
-            && !merged_dir.starts_with(&recovered_dir),
-        "Output directories must be separate and must not contain the input directory"
+        !input_dir.starts_with(&recovered_dir) && !input_dir.starts_with(&merged_dir),
+        "An output directory cannot equal or contain the input directory"
     );
 
-    let recordings = discovery::find_recordings(&input_dir)?
-        .into_iter()
-        .filter(|path| !path.starts_with(&recovered_dir) && !path.starts_with(&merged_dir))
-        .collect::<Vec<_>>();
+    ensure!(
+        !recovered_dir.starts_with(&merged_dir) && !merged_dir.starts_with(&recovered_dir),
+        "Recovered and merged directories must be separate"
+    );
+
+    let recordings = discovery::find_recordings(&input_dir, &[&recovered_dir, &merged_dir])?;
 
     ensure!(
         !recordings.is_empty(),
@@ -38,39 +41,139 @@ pub fn run(args: PrepareArgs) -> Result<CommandOutcome> {
         input_dir.display()
     );
 
-    let recovered = discovery::find_recordings(&recovered_dir)?;
-    let merged = discovery::find_recordings(&merged_dir)?;
+    let groups = discovery::group_recordings(recordings, &input_dir)?;
+    let mut had_warnings = false;
 
-    if recordings.is_empty() {
-        anyhow::bail!("No MCAP recordings found in {}", args.input_dir.display());
-    }
+    for group in groups {
+        let merged_path = merged_dir.join(&group.output);
 
-    let mut failed = Vec::new();
-
-    for recording in &recordings {
-        eprintln!("Validating {}", recording.display());
-
-        let status = crate::mcap_cli::doctor(recording)?;
-
-        if !status.success() {
-            eprintln!("Validation failed for {}: {status}", recording.display());
-            failed.push(recording);
+        if merged_path.is_file() {
+            eprintln!("Already prepared: {}", merged_path.display());
+            continue;
         }
+
+        let mut usable_parts = Vec::new();
+
+        for source in group.parts {
+            let relative = source.strip_prefix(&input_dir)?;
+            let recovered_path = recovered_dir.join(relative);
+
+            match usable_recording(&source, &recovered_path, &mut had_warnings)? {
+                Some(path) => usable_parts.push(path),
+                None => {
+                    eprintln!("Warning: skipping {}: no usable messages", source.display());
+                    had_warnings = true;
+                }
+            }
+        }
+
+        if usable_parts.is_empty() {
+            eprintln!(
+                "Warning: skipping group {}: no usable recordings",
+                group.output.display()
+            );
+            had_warnings = true;
+            continue;
+        }
+
+        write_output(&merged_path, |temporary| {
+            match usable_parts.as_slice() {
+                [single] => {
+                    fs::copy(single, temporary)?;
+                }
+                multiple => {
+                    let status = mcap_cli::merge(multiple, temporary)?;
+
+                    ensure!(
+                        status.success(),
+                        "Merge failed for {}: {status}",
+                        merged_path.display()
+                    );
+                }
+            }
+
+            Ok(true)
+        })?;
+
+        eprintln!("Prepared: {}", merged_path.display());
     }
 
-    if !failed.is_empty() {
-        anyhow::bail!(
-            "{} recording(s) failed validation; recovery is not implemented yet",
-            failed.len()
-        );
+    Ok(if had_warnings {
+        CommandOutcome::Warnings
+    } else {
+        CommandOutcome::Success
+    })
+}
+
+fn usable_recording(
+    source: &Path,
+    recovered: &Path,
+    had_warnings: &mut bool,
+) -> Result<Option<PathBuf>> {
+    // Reuse a previously completed recovery.
+    if recovered.is_file() {
+        return nonempty_recording(recovered);
     }
 
-    Ok(CommandOutcome::Success)
+    // An empty file cannot contain any messages.
+    if fs::metadata(source)?.len() == 0 {
+        return Ok(None);
+    }
+
+    let status = mcap_cli::doctor(source)?;
+
+    match status.code() {
+        Some(0) => return nonempty_recording(source),
+        Some(1) => {} // Attempt recovery.
+        _ => bail!("mcap doctor failed for {}: {status}", source.display()),
+    }
+
+    write_output(recovered, |temporary| {
+        let status = mcap_cli::recover(source, temporary)?;
+
+        match status.code() {
+            Some(0) => {}
+            Some(3) => {
+                eprintln!("Warning: recovered {} with data loss", source.display());
+                *had_warnings = true;
+            }
+            _ => bail!("Recovery failed for {}: {status}", source.display()),
+        }
+
+        // Header/footer-only input may recover to a valid, empty MCAP.
+        // Returning false discards that temporary output.
+        mcap_cli::has_messages(temporary)
+    })
 }
 
-enum RecoveryOutcome {
-    Usable(CommandOutcome),
-    Empty,
+fn nonempty_recording(path: &Path) -> Result<Option<PathBuf>> {
+    Ok(if mcap_cli::has_messages(path)? {
+        Some(path.to_path_buf())
+    } else {
+        None
+    })
 }
 
-fn recover(input: &Path, output: &Path) -> Result<RecoveryOutcome> {}
+// The callback returns true to publish the file, or false to discard it.
+fn write_output(
+    destination: &Path,
+    write: impl FnOnce(&Path) -> Result<bool>,
+) -> Result<Option<PathBuf>> {
+    let parent = destination
+        .parent()
+        .context("Output path has no parent directory")?;
+
+    fs::create_dir_all(parent)?;
+
+    let temporary_dir = tempfile::tempdir_in(parent)?;
+    let temporary = temporary_dir.path().join("output.mcap");
+
+    if !write(&temporary)? {
+        return Ok(None);
+    }
+
+    fs::rename(&temporary, destination)
+        .with_context(|| format!("Could not publish {}", destination.display()))?;
+
+    Ok(Some(destination.to_path_buf()))
+}
