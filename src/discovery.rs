@@ -121,8 +121,8 @@ mod tests {
         let mcap_file = temp_dir.path().join("some.mcap");
         let other_file = temp_dir.path().join("other_file");
 
-        fs::write(&mcap_file, "")?;
-        fs::write(&other_file, "")?;
+        fs::write(&mcap_file, &[])?;
+        fs::write(&other_file, &[])?;
 
         let recordings = find_recordings(temp_dir.path(), &[])?;
 
@@ -139,8 +139,8 @@ mod tests {
         let nested_file = nested_dir.join("nested.mcap");
 
         fs::create_dir_all(&nested_dir)?;
-        fs::write(&original_file, "")?;
-        fs::write(&nested_file, "")?;
+        fs::write(&original_file, &[])?;
+        fs::write(&nested_file, &[])?;
 
         let mut recordings = find_recordings(temp_dir.path(), &[])?;
         let mut expected = vec![original_file, nested_file];
@@ -169,10 +169,10 @@ mod tests {
         fs::create_dir_all(&some_excluded_dir)?;
         fs::create_dir_all(&nested_dir)?;
 
-        fs::write(&original_file, "")?;
-        fs::write(&some_excluded_file, "")?;
-        fs::write(&other_excluded_file, "")?;
-        fs::write(&nested_file, "")?;
+        fs::write(&original_file, &[])?;
+        fs::write(&some_excluded_file, &[])?;
+        fs::write(&other_excluded_file, &[])?;
+        fs::write(&nested_file, &[])?;
 
         let excluded = vec![
             some_excluded_dir.as_path(),

@@ -18,7 +18,7 @@ fn run() -> Result<CommandOutcome> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Prepare(args) => commands::prepare::run(args),
+        Commands::Prepare(args) => commands::prepare::run(args, &mcap_cli::RealMcapCli),
         Commands::Analyze(args) => commands::analyze::run(args),
         Commands::Upload(args) => commands::upload::run(args),
     }

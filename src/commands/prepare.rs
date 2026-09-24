@@ -4,9 +4,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{CommandOutcome, cli::PrepareArgs, discovery, mcap_cli};
+use crate::{
+    CommandOutcome,
+    cli::PrepareArgs,
+    discovery,
+    mcap_cli::McapCli,
+};
 
-pub fn run(args: PrepareArgs) -> Result<CommandOutcome> {
+pub fn run(args: PrepareArgs, mcap: &impl McapCli) -> Result<CommandOutcome> {
     let input_dir = args
         .input_dir
         .canonicalize()
@@ -59,7 +64,7 @@ pub fn run(args: PrepareArgs) -> Result<CommandOutcome> {
             let relative = source.strip_prefix(&input_dir)?;
             let recovered_path = recovered_dir.join(relative);
 
-            match usable_recording(&source, &recovered_path, &mut had_warnings)? {
+            match usable_recording(&source, &recovered_path, &mut had_warnings, mcap)? {
                 Some(path) => usable_parts.push(path),
                 None => {
                     eprintln!("Warning: skipping {}: no usable messages", source.display());
@@ -83,7 +88,7 @@ pub fn run(args: PrepareArgs) -> Result<CommandOutcome> {
                     fs::copy(single, temporary)?;
                 }
                 multiple => {
-                    let status = mcap_cli::merge(multiple, temporary)?;
+                    let status = mcap.merge(multiple, temporary)?;
 
                     ensure!(
                         status.success(),
@@ -110,11 +115,12 @@ fn usable_recording(
     source: &Path,
     recovered: &Path,
     had_warnings: &mut bool,
+    mcap: &impl McapCli,
 ) -> Result<Option<PathBuf>> {
     // Reuse a previously completed recovery.
     if recovered.is_file() {
         eprintln!("Reusing recovered recording: {}", recovered.display());
-        return nonempty_recording(recovered);
+        return nonempty_recording(recovered, mcap);
     }
 
     // An empty file cannot contain any messages.
@@ -122,16 +128,16 @@ fn usable_recording(
         return Ok(None);
     }
 
-    let status = mcap_cli::doctor(source)?;
+    let status = mcap.doctor(source)?;
 
     match status.code() {
-        Some(0) => return nonempty_recording(source),
+        Some(0) => return nonempty_recording(source, mcap),
         Some(1) => {} // Attempt recovery.
         _ => bail!("mcap doctor failed for {}: {status}", source.display()),
     }
 
     write_output(recovered, |temporary| {
-        let status = mcap_cli::recover(source, temporary)?;
+        let status = mcap.recover(source, temporary)?;
 
         match status.code() {
             Some(0) => {}
@@ -144,12 +150,12 @@ fn usable_recording(
 
         // Header/footer-only input may recover to a valid, empty MCAP.
         // Returning false discards that temporary output.
-        mcap_cli::has_messages(temporary)
+        mcap.has_messages(temporary)
     })
 }
 
-fn nonempty_recording(path: &Path) -> Result<Option<PathBuf>> {
-    Ok(if mcap_cli::has_messages(path)? {
+fn nonempty_recording(path: &Path, mcap: &impl McapCli) -> Result<Option<PathBuf>> {
+    Ok(if mcap.has_messages(path)? {
         Some(path.to_path_buf())
     } else {
         None
@@ -183,6 +189,27 @@ fn write_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::ExitStatus;
+
+    struct NoMcapCalls;
+
+    impl McapCli for NoMcapCalls {
+        fn doctor(&self, _file: &Path) -> Result<ExitStatus> {
+            panic!("doctor should not be called");
+        }
+
+        fn recover(&self, _input: &Path, _output: &Path) -> Result<ExitStatus> {
+            panic!("recover should not be called");
+        }
+
+        fn merge(&self, _inputs: &[PathBuf], _output: &Path) -> Result<ExitStatus> {
+            panic!("merge should not be called");
+        }
+
+        fn has_messages(&self, _file: &Path) -> Result<bool> {
+            panic!("has_messages should not be called");
+        }
+    }
 
     #[test]
     fn publishes_completed_output() -> Result<()> {
@@ -220,8 +247,7 @@ mod tests {
         })?;
 
         assert_eq!(result, None);
-
-        assert!(!fs::exists(destination)?);
+        assert!(!destination.is_file());
 
         Ok(())
     }
@@ -268,6 +294,40 @@ mod tests {
         let contents = fs::read(&destination)?;
 
         assert_eq!(contents, b"preserved");
+
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_source() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let source = temp_dir.path().join("some.mcap");
+        let recovered = temp_dir.path().join("recovered/some.mcap");
+
+        let mut had_warnings = false;
+        let result = usable_recording(&source, &recovered, &mut had_warnings, &NoMcapCalls);
+
+        assert!(result.is_err());
+        assert!(!had_warnings);
+        assert!(!recovered.is_file());
+
+        Ok(())
+    }
+
+    #[test]
+    fn skips_empty_source() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let source = temp_dir.path().join("some.mcap");
+        let recovered = temp_dir.path().join("recovered/some.mcap");
+
+        fs::write(&source, &[])?;
+
+        let mut had_warnings = false;
+        let result = usable_recording(&source, &recovered, &mut had_warnings, &NoMcapCalls)?;
+
+        assert_eq!(result, None);
+        assert!(!had_warnings);
+        assert!(!recovered.is_file());
 
         Ok(())
     }
