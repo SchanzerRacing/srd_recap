@@ -46,8 +46,7 @@ pub fn has_messages(file: &Path) -> Result<bool> {
         String::from_utf8_lossy(&output.stderr).trim()
     );
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("mcap info returned invalid UTF-8")?;
+    let stdout = String::from_utf8(output.stdout).context("mcap info returned invalid UTF-8")?;
 
     let count = stdout
         .lines()

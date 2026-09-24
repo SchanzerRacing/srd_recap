@@ -113,6 +113,7 @@ fn usable_recording(
 ) -> Result<Option<PathBuf>> {
     // Reuse a previously completed recovery.
     if recovered.is_file() {
+        eprintln!("Reusing recovered recording: {}", recovered.display());
         return nonempty_recording(recovered);
     }
 
@@ -177,4 +178,97 @@ fn write_output(
         .with_context(|| format!("Could not publish {}", destination.display()))?;
 
     Ok(Some(destination.to_path_buf()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publishes_completed_output() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let source = temp_dir.path().join("source.mcap");
+        let destination = temp_dir.path().join("nested/destination.mcap");
+
+        fs::write(&source, b"test")?;
+
+        let result = write_output(&destination, |temporary| {
+            fs::copy(source, temporary)?;
+            Ok(true)
+        })?;
+
+        assert_eq!(result, Some(destination.clone()));
+
+        let contents = fs::read(&destination)?;
+
+        assert_eq!(contents, b"test");
+
+        Ok(())
+    }
+
+    #[test]
+    fn discards_empty_output() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let source = temp_dir.path().join("source.mcap");
+        let destination = temp_dir.path().join("destination.mcap");
+
+        fs::write(&source, b"test")?;
+
+        let result = write_output(&destination, |temporary| {
+            fs::copy(source, temporary)?;
+            Ok(false)
+        })?;
+
+        assert_eq!(result, None);
+
+        assert!(!fs::exists(destination)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_existing_output_when_discarded() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let source = temp_dir.path().join("source.mcap");
+        let destination = temp_dir.path().join("destination.mcap");
+
+        fs::write(&source, b"test")?;
+        fs::write(&destination, b"preserved")?;
+
+        let result = write_output(&destination, |temporary| {
+            fs::copy(source, temporary)?;
+            Ok(false)
+        })?;
+
+        assert_eq!(result, None);
+
+        let contents = fs::read(&destination)?;
+
+        assert_eq!(contents, b"preserved");
+
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_existing_output_on_failure() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let source = temp_dir.path().join("source.mcap");
+        let destination = temp_dir.path().join("destination.mcap");
+
+        fs::write(&source, b"test")?;
+        fs::write(&destination, b"preserved")?;
+
+        let result = write_output(&destination, |temporary| {
+            fs::copy(source, temporary)?;
+            bail!("Simulated write failure");
+        });
+
+        assert!(result.is_err());
+
+        let contents = fs::read(&destination)?;
+
+        assert_eq!(contents, b"preserved");
+
+        Ok(())
+    }
 }
