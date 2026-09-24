@@ -113,7 +113,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn returns_error_when_paths_dont_exist() -> anyhow::Result<()> {
+    fn returns_error_when_paths_dont_exist() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
 
         assert!(find_recordings(temp_dir.path().join("nonexistent").as_path(), &[]).is_err());
@@ -122,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_empty_when_no_recordings_exist() -> anyhow::Result<()> {
+    fn returns_empty_when_no_recordings_exist() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
 
         let recordings = find_recordings(temp_dir.path(), &[])?;
@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_mcap_files() -> anyhow::Result<()> {
+    fn ignores_non_mcap_files() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let mcap_file = temp_dir.path().join("some.mcap");
         let other_file = temp_dir.path().join("other_file");
@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_recordings_recursively() -> anyhow::Result<()> {
+    fn finds_recordings_recursively() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let original_file = temp_dir.path().join("original.mcap");
         let nested_dir = temp_dir.path().join("session");
@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn excludes_directory_subtrees() -> anyhow::Result<()> {
+    fn excludes_directory_subtrees() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let root = temp_dir.path();
         let original_file = root.join("original.mcap");
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_empty_groups() -> anyhow::Result<()> {
+    fn returns_empty_groups() -> Result<()> {
         let root = Path::new("root");
         assert!(group_recordings(vec![], root)?.is_empty());
 
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_recordings_outside_root() -> anyhow::Result<()> {
+    fn rejects_recordings_outside_root() -> Result<()> {
         let root = Path::new("root");
         let recordings = vec![Path::new("other_root").join("other.mcap")];
 
@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_standalone_recordings() -> anyhow::Result<()> {
+    fn groups_standalone_recordings() -> Result<()> {
         let root = Path::new("root");
         let recordings = vec![root.join("some.mcap"), root.join("other.mcap")];
 
@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_nonnumeric_suffixes() -> anyhow::Result<()> {
+    fn preserves_nonnumeric_suffixes() -> Result<()> {
         let root = Path::new("root");
 
         let groups = group_recordings(vec![root.join("rec_final.mcap")], root)?;
@@ -262,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_parts_in_numeric_order() -> anyhow::Result<()> {
+    fn groups_parts_in_numeric_order() -> Result<()> {
         let root = Path::new("root");
         let recordings = vec![
             root.join("rec_10.mcap"),
@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_sessions_separate() -> anyhow::Result<()> {
+    fn keeps_sessions_separate() -> Result<()> {
         let root = Path::new("root");
         let recordings = vec![
             root.join("a/rec_0.mcap"),
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_standalone_split_conflict() -> anyhow::Result<()> {
+    fn rejects_standalone_split_conflict() -> Result<()> {
         let root = Path::new("root");
         let recordings = vec![root.join("rec.mcap"), root.join("rec_0.mcap")];
 
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_part_indices() -> anyhow::Result<()> {
+    fn rejects_duplicate_part_indices() -> Result<()> {
         let root = Path::new("root");
         let recordings = vec![root.join("rec_1.mcap"), root.join("rec_01.mcap")];
 
@@ -338,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_timestamp() -> anyhow::Result<()> {
+    fn preserves_timestamp_without_part_index() -> Result<()> {
         let root = Path::new("root");
         let recordings = vec![root.join("rosbag2_2026_08_14-16_31_11.mcap")];
 
@@ -347,6 +347,23 @@ mod tests {
         let expected = vec![RecordingGroup {
             output: PathBuf::from("rosbag2_2026_08_14-16_31_11.mcap"),
             parts: vec![root.join("rosbag2_2026_08_14-16_31_11.mcap")],
+        }];
+
+        assert_eq!(groups, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn splits_timestamp_and_part_index() -> Result<()> {
+        let root = Path::new("root");
+        let recordings = vec![root.join("rosbag2_2026_08_14-16_31_11_0.mcap")];
+
+        let groups = group_recordings(recordings, root)?;
+
+        let expected = vec![RecordingGroup {
+            output: PathBuf::from("rosbag2_2026_08_14-16_31_11.mcap"),
+            parts: vec![root.join("rosbag2_2026_08_14-16_31_11_0.mcap")],
         }];
 
         assert_eq!(groups, expected);
