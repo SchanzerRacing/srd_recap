@@ -43,7 +43,7 @@ pub enum Commands {
 
 #[derive(Debug, Args)]
 pub struct PrepareArgs {
-    /// Output directory; defaults to a new directory under the working directory
+    /// Output directory; defaults to [input_dir]
     #[arg(short, long, value_name = "DIRECTORY")]
     pub output_dir: Option<PathBuf>,
 

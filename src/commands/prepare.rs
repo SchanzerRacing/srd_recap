@@ -14,8 +14,9 @@ pub fn run(args: PrepareArgs) -> Result<CommandOutcome> {
 
     ensure!(input_dir.is_dir(), "Input must be a directory");
 
-    let recovered_dir = PathBuf::from("recovered");
-    let merged_dir = args.output_dir.unwrap_or_else(|| PathBuf::from("merged"));
+    let output_base = args.output_dir.unwrap_or_else(|| input_dir.clone());
+    let recovered_dir = output_base.join("recovered");
+    let merged_dir = output_base.join("merged");
 
     fs::create_dir_all(&recovered_dir)?;
     fs::create_dir_all(&merged_dir)?;
