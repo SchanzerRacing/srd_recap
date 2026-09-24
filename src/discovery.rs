@@ -1,9 +1,16 @@
 use anyhow::{Context, Result, ensure};
+use regex::Regex;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::LazyLock,
 };
 use walkdir::WalkDir;
+
+static ROSBAG_TIMESTAMP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^rosbag2_[0-9]{4}_[0-9]{2}_[0-9]{2}-[0-9]{2}_[0-9]{2}_[0-9]{2}$")
+        .expect("rosbag timestamp regex must be valid")
+});
 
 #[derive(Debug, PartialEq)]
 pub struct RecordingGroup {
@@ -48,16 +55,7 @@ pub fn group_recordings(recordings: Vec<PathBuf>, root: &Path) -> Result<Vec<Rec
             .and_then(|value| value.to_str())
             .context("Recording filename is not valid UTF-8")?;
 
-        let (base, index) = match stem.rsplit_once('_') {
-            Some((base, suffix))
-                if !base.is_empty()
-                    && !suffix.is_empty()
-                    && suffix.bytes().all(|byte| byte.is_ascii_digit()) =>
-            {
-                (base, Some(suffix.parse::<u64>()?))
-            }
-            _ => (stem, None),
-        };
+        let (base, index) = split_recording_stem(stem)?;
 
         let output = relative
             .parent()
@@ -88,6 +86,25 @@ pub fn group_recordings(recordings: Vec<PathBuf>, root: &Path) -> Result<Vec<Rec
             parts: parts.into_values().collect(),
         })
         .collect())
+}
+
+fn split_recording_stem(stem: &str) -> Result<(&str, Option<u64>)> {
+    if ROSBAG_TIMESTAMP.is_match(stem) {
+        return Ok((stem, None));
+    }
+
+    let (base, index) = match stem.rsplit_once('_') {
+        Some((base, suffix))
+            if !base.is_empty()
+                && !suffix.is_empty()
+                && suffix.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            (base, Some(suffix.parse::<u64>()?))
+        }
+        _ => (stem, None),
+    };
+
+    Ok((base, index))
 }
 
 #[cfg(test)]
@@ -316,6 +333,23 @@ mod tests {
         let recordings = vec![root.join("rec_1.mcap"), root.join("rec_01.mcap")];
 
         assert!(group_recordings(recordings, root).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_timestamp() -> anyhow::Result<()> {
+        let root = Path::new("root");
+        let recordings = vec![root.join("rosbag2_2026_08_14-16_31_11.mcap")];
+
+        let groups = group_recordings(recordings, root)?;
+
+        let expected = vec![RecordingGroup {
+            output: PathBuf::from("rosbag2_2026_08_14-16_31_11.mcap"),
+            parts: vec![root.join("rosbag2_2026_08_14-16_31_11.mcap")],
+        }];
+
+        assert_eq!(groups, expected);
 
         Ok(())
     }
