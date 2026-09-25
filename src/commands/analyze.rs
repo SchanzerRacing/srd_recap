@@ -5,9 +5,33 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
-use core::time;
 use memmap2::Mmap;
-use std::{collections::HashMap, fs, path::Path};
+use serde::Serialize;
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
+
+#[derive(Serialize)]
+struct RecordingReport {
+    mcap: PathBuf,
+    segments: Vec<SegmentReport>,
+}
+
+#[derive(Serialize)]
+struct SegmentReport {
+    segment: DrivingSegment,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize)]
+struct DrivingSegment {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    start_truncated: bool,
+    end_truncated: bool,
+    successful: bool,
+}
 
 pub fn run(args: AnalyzeArgs) -> Result<CommandOutcome> {
     let input_dir = args
@@ -31,15 +55,22 @@ pub fn run(args: AnalyzeArgs) -> Result<CommandOutcome> {
         input_dir.display()
     );
 
+    let mut reports = Vec::<RecordingReport>::new();
+
     for recording in recordings {
-        eprintln!("Analyzing: {}", recording.display());
-        analyze_recording(&recording, &output_dir)?;
+        println!("Analyzing: {}", recording.display());
+        reports.push(analyze_recording(&recording)?);
     }
+
+    let summary = output_dir.join("summary.json");
+
+    println!("Writing summary to {}", summary.display());
+    write_summary(&summary, &reports)?;
 
     Ok(CommandOutcome::Success)
 }
 
-fn analyze_recording(recording: &Path, _output: &Path) -> Result<()> {
+fn analyze_recording(recording: &Path) -> Result<RecordingReport> {
     let fd = fs::File::open(recording).context("Couldn't open MCAP file")?;
     let mapped = unsafe { Mmap::map(&fd) }.context("Couldn't map MCAP file")?;
     let summary = mcap::Summary::read(&mapped)
@@ -78,29 +109,47 @@ fn analyze_recording(recording: &Path, _output: &Path) -> Result<()> {
             let nsecs = decoded.u32("header.stamp.nanosec")?;
             let stamp = DateTime::from_timestamp(secs as i64, nsecs as u32)
                 .expect("timestamp should be valid");
-            tracker.observe(stamp, state == 3);
+            tracker.observe(stamp, state);
         }
     }
 
-    let segments = tracker.finish();
+    let segments = tracker.finalize();
+
+    let mut reports = Vec::<SegmentReport>::new();
 
     for segment in segments {
         println!(
-            "Found {:.3}s driving segment starting at {}",
+            "Found {}successful {:.3}s driving segment starting at {}",
+            if segment.successful { "" } else { "un" },
             (segment.end - segment.start).as_seconds_f64(),
-            segment.start.format("%H:%M:%S%.3f").to_string()
+            segment.start.format("%H:%M:%S%.3f").to_string(),
         );
+
+        if segment.start_truncated {
+            eprintln!("Segment start is truncated");
+        }
+
+        if segment.end_truncated {
+            eprintln!("Segment end is truncated");
+        }
+
+        reports.push(SegmentReport { segment: segment })
     }
 
-    Ok(())
+    let file_name = recording
+        .file_name()
+        .expect("recording file name should exist");
+
+    Ok(RecordingReport {
+        mcap: PathBuf::from(file_name),
+        segments: reports,
+    })
 }
 
-#[derive(Debug, PartialEq, Clone)]
-struct DrivingSegment {
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    start_truncated: bool,
-    end_truncated: bool,
+fn write_summary(output: &Path, reports: &[RecordingReport]) -> Result<()> {
+    let fd = fs::File::create(output).context(format!("Could not create {}", output.display()))?;
+    serde_json::to_writer_pretty(fd, reports).context("Failed to serialize segment reports")?;
+    Ok(())
 }
 
 struct DrivingSegmentTracker {
@@ -116,42 +165,51 @@ impl DrivingSegmentTracker {
         }
     }
 
-    pub fn observe(&mut self, timestamp: DateTime<Utc>, is_driving: bool) -> () {
-        match (self.was_driving, is_driving) {
-            (None, true) => {
+    pub fn observe(&mut self, timestamp: DateTime<Utc>, state: u8) -> () {
+        match (self.was_driving, state) {
+            (None, 3) => {
                 self.segments.push(DrivingSegment {
                     start: timestamp,
                     end: timestamp,
                     start_truncated: true,
                     end_truncated: true,
+                    successful: false,
                 });
             }
-            (Some(false), true) => {
+            (Some(false), 3) => {
                 self.segments.push(DrivingSegment {
                     start: timestamp,
                     end: timestamp,
                     start_truncated: false,
                     end_truncated: true,
+                    successful: false,
                 });
             }
-            (Some(true), true) => {
+            (Some(true), 3) => {
                 if let Some(segment) = self.segments.last_mut() {
                     segment.end = timestamp;
                 }
             }
-            (Some(true), false) => {
+            (Some(true), 1) | (Some(true), 2) | (Some(true), 4) => {
                 if let Some(segment) = self.segments.last_mut() {
                     segment.end = timestamp;
                     segment.end_truncated = false;
                 }
             }
+            (Some(true), 5) => {
+                if let Some(segment) = self.segments.last_mut() {
+                    segment.end = timestamp;
+                    segment.end_truncated = false;
+                    segment.successful = true;
+                }
+            }
             _ => (),
         }
 
-        self.was_driving = Some(is_driving);
+        self.was_driving = Some(state == 3);
     }
 
-    pub fn finish(self) -> Vec<DrivingSegment> {
+    pub fn finalize(self) -> Vec<DrivingSegment> {
         self.segments
     }
 }
