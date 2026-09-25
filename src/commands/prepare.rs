@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{CommandOutcome, cli::PrepareArgs, discovery, mcap_cli::McapCli};
+use crate::{CommandOutcome, cli::PrepareArgs, utils::discovery, mcap_cli::McapCli};
 
 pub fn run(args: PrepareArgs, mcap: &impl McapCli) -> Result<CommandOutcome> {
     let input_dir = args
@@ -143,8 +143,6 @@ fn usable_recording(
             _ => bail!("Recovery failed for {}: {status}", source.display()),
         }
 
-        // Header/footer-only input may recover to a valid, empty MCAP.
-        // Returning false discards that temporary output.
         mcap.has_messages(temporary)
     })
 }
@@ -157,7 +155,6 @@ fn nonempty_recording(path: &Path, mcap: &impl McapCli) -> Result<Option<PathBuf
     })
 }
 
-// The callback returns true to publish the file, or false to discard it.
 fn write_output(
     destination: &Path,
     write: impl FnOnce(&Path) -> Result<bool>,

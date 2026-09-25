@@ -6,7 +6,7 @@ use cli::{Cli, Commands};
 
 mod cli;
 mod commands;
-mod discovery;
+mod utils;
 mod mcap_cli;
 
 pub enum CommandOutcome {

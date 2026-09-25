@@ -77,6 +77,9 @@ For each group, preparation:
 
 ## KPI extraction and annotations
 
+See [Planned KPIs](PLANNED_KPIS.md) for driving intervals, mission outcomes, motion
+and steering metrics, and open signal-definition questions.
+
 KPI extraction is a core part of the project. Analysis results should feed both
 clip-selection rules and the properties published to Foxglove.
 
