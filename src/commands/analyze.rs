@@ -5,14 +5,9 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
+use core::time;
 use memmap2::Mmap;
 use std::{collections::HashMap, fs, path::Path};
-
-#[derive(Debug, PartialEq)]
-struct DrivingSegment {
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-}
 
 pub fn run(args: AnalyzeArgs) -> Result<CommandOutcome> {
     let input_dir = args
@@ -57,15 +52,17 @@ fn analyze_recording(recording: &Path, _output: &Path) -> Result<()> {
     let mut decoders = HashMap::<u16, Decoder>::new();
 
     for channel in summary.channels.values() {
-        let schema = channel.schema.as_deref().expect("message should have a schema");
+        let schema = channel
+            .schema
+            .as_deref()
+            .expect("message should have a schema");
         let decoder = Decoder::new(&schema.name, schema.data.as_ref())?;
         decoders.insert(channel.id, decoder);
     }
 
     println!("Decoding {} messages", stats.message_count);
 
-    let mut driving_start: Option<DateTime<Utc>> = None;
-    let mut segments = Vec::new();
+    let mut tracker = DrivingSegmentTracker::new();
 
     for message in mcap::MessageStream::new(&mapped)? {
         let message = message?;
@@ -81,23 +78,11 @@ fn analyze_recording(recording: &Path, _output: &Path) -> Result<()> {
             let nsecs = decoded.u32("header.stamp.nanosec")?;
             let stamp = DateTime::from_timestamp(secs as i64, nsecs as u32)
                 .expect("timestamp should be valid");
-
-            if state == 3 {
-                if driving_start.is_none() {
-                    driving_start = Some(stamp);
-                }
-            } else if let Some(start) = driving_start.take() {
-                segments.push(DrivingSegment {
-                    start,
-                    end: stamp,
-                });
-            }
+            tracker.observe(stamp, state == 3);
         }
     }
 
-    if segments.is_empty() {
-        return Ok(());
-    }
+    let segments = tracker.finish();
 
     for segment in segments {
         println!(
@@ -108,4 +93,65 @@ fn analyze_recording(recording: &Path, _output: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct DrivingSegment {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    start_truncated: bool,
+    end_truncated: bool,
+}
+
+struct DrivingSegmentTracker {
+    segments: Vec<DrivingSegment>,
+    was_driving: Option<bool>,
+}
+
+impl DrivingSegmentTracker {
+    pub fn new() -> Self {
+        Self {
+            segments: Vec::new(),
+            was_driving: None,
+        }
+    }
+
+    pub fn observe(&mut self, timestamp: DateTime<Utc>, is_driving: bool) -> () {
+        match (self.was_driving, is_driving) {
+            (None, true) => {
+                self.segments.push(DrivingSegment {
+                    start: timestamp,
+                    end: timestamp,
+                    start_truncated: true,
+                    end_truncated: true,
+                });
+            }
+            (Some(false), true) => {
+                self.segments.push(DrivingSegment {
+                    start: timestamp,
+                    end: timestamp,
+                    start_truncated: false,
+                    end_truncated: true,
+                });
+            }
+            (Some(true), true) => {
+                if let Some(segment) = self.segments.last_mut() {
+                    segment.end = timestamp;
+                }
+            }
+            (Some(true), false) => {
+                if let Some(segment) = self.segments.last_mut() {
+                    segment.end = timestamp;
+                    segment.end_truncated = false;
+                }
+            }
+            _ => (),
+        }
+
+        self.was_driving = Some(is_driving);
+    }
+
+    pub fn finish(self) -> Vec<DrivingSegment> {
+        self.segments
+    }
 }
