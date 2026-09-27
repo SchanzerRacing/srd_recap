@@ -1,15 +1,17 @@
 use crate::{
     CommandOutcome,
     cli::AnalyzeArgs,
+    tracking::{segments, stats},
     utils::{decoding::Decoder, discovery},
 };
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use memmap2::Mmap;
 use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
+    os::unix::process,
     path::{Path, PathBuf},
 };
 
@@ -19,18 +21,31 @@ struct RecordingReport {
     segments: Vec<SegmentReport>,
 }
 
-#[derive(Serialize)]
-struct SegmentReport {
-    segment: DrivingSegment,
+impl RecordingReport {
+    pub fn new(mcap: &str) -> Self {
+        Self {
+            mcap: PathBuf::from(mcap),
+            segments: Vec::<SegmentReport>::new(),
+        }
+    }
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize)]
-struct DrivingSegment {
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
+#[derive(Serialize, Default)]
+struct SegmentReport {
+    start: i64,
+    end: i64,
     start_truncated: bool,
     end_truncated: bool,
     successful: bool,
+    travel_distance: Option<f64>,
+    max_velocity: Option<f64>,
+    avg_velocity: Option<f64>
+}
+
+#[derive(Default)]
+struct Kpis {
+    travel_distance: stats::BaselineDelta,
+    velocity: stats::MinMaxMeanStdDev,
 }
 
 pub fn run(args: AnalyzeArgs) -> Result<CommandOutcome> {
@@ -71,8 +86,13 @@ pub fn run(args: AnalyzeArgs) -> Result<CommandOutcome> {
 }
 
 fn analyze_recording(recording: &Path) -> Result<RecordingReport> {
-    let fd = fs::File::open(recording).context("Couldn't open MCAP file")?;
-    let mapped = unsafe { Mmap::map(&fd) }.context("Couldn't map MCAP file")?;
+    let file = fs::File::open(recording).context("Couldn't open MCAP file")?;
+    let filename = recording
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("path has no valid UTF-8 filename")?;
+
+    let mapped = unsafe { Mmap::map(&file) }.context("Couldn't map MCAP file")?;
     let summary = mcap::Summary::read(&mapped)
         .context("Couldn't read MCAP file summary")?
         .expect("summary should exist");
@@ -93,7 +113,9 @@ fn analyze_recording(recording: &Path) -> Result<RecordingReport> {
 
     println!("Decoding {} messages", stats.message_count);
 
-    let mut tracker = DrivingSegmentTracker::new();
+    let mut report = RecordingReport::new(filename);
+    let mut tracker = segments::Tracker::default();
+    let mut kpis = Kpis::default();
 
     for message in mcap::MessageStream::new(&mapped)? {
         let message = message?;
@@ -105,24 +127,44 @@ fn analyze_recording(recording: &Path) -> Result<RecordingReport> {
 
         if message.channel.topic == "/as_state" {
             let state = decoded.u8("state")?;
-            let secs = decoded.i32("header.stamp.sec")?;
-            let nsecs = decoded.u32("header.stamp.nanosec")?;
-            let stamp = DateTime::from_timestamp(secs as i64, nsecs as u32)
-                .expect("timestamp should be valid");
-            tracker.observe(stamp, state);
+            let secs = decoded.i32("header.stamp.sec")? as i64;
+            let nsecs = decoded.u32("header.stamp.nanosec")? as i64;
+            let stamp = secs * 1_000_000_000 + nsecs;
+
+            if let Some(event) = tracker.observe(stamp, state) {
+                process_segment_event(event, &mut report, &mut kpis);
+            }
+            continue;
+        }
+
+        if !tracker.driving() {
+            continue;
+        }
+
+        if message.channel.topic == "/travel_distance" {
+            kpis.travel_distance.sample(decoded.f64("data")?);
+            continue;
+        }
+
+        if message.channel.topic == "/est_vel" {
+            kpis.velocity.sample(decoded.f64("twist.linear.x")?);
+            continue;
         }
     }
 
-    let segments = tracker.finalize();
+    if let Some(event) = tracker.finish() {
+        process_segment_event(event, &mut report, &mut kpis);
+    }
 
-    let mut reports = Vec::<SegmentReport>::new();
+    for segment in &report.segments {
+        let t0 = DateTime::from_timestamp_nanos(segment.start);
+        let t1 = DateTime::from_timestamp_nanos(segment.end);
 
-    for segment in segments {
         println!(
             "Found {}successful {:.3}s driving segment starting at {}",
             if segment.successful { "" } else { "un" },
-            (segment.end - segment.start).as_seconds_f64(),
-            segment.start.format("%H:%M:%S%.3f").to_string(),
+            (t1 - t0).as_seconds_f64(),
+            t0.format("%H:%M:%S%.3f").to_string(),
         );
 
         if segment.start_truncated {
@@ -132,84 +174,48 @@ fn analyze_recording(recording: &Path) -> Result<RecordingReport> {
         if segment.end_truncated {
             eprintln!("Segment end is truncated");
         }
-
-        reports.push(SegmentReport { segment: segment })
     }
 
-    let file_name = recording
-        .file_name()
-        .expect("recording file name should exist");
+    Ok(report)
+}
 
-    Ok(RecordingReport {
-        mcap: PathBuf::from(file_name),
-        segments: reports,
-    })
+fn process_segment_event(event: segments::Event, report: &mut RecordingReport, kpis: &mut Kpis) {
+    match event {
+        segments::Event::Start {
+            timestamp,
+            truncated,
+        } => {
+            let segment = SegmentReport {
+                start: timestamp,
+                start_truncated: truncated,
+                ..Default::default()
+            };
+
+            report.segments.push(segment);
+            *kpis = Kpis::default();
+        }
+        segments::Event::Stop {
+            timestamp,
+            truncated,
+            successful,
+        } => {
+            let segment = report
+                .segments
+                .last_mut()
+                .expect("a stop event should have a matching start event");
+
+            segment.end = timestamp;
+            segment.end_truncated = truncated;
+            segment.successful = successful;
+            segment.travel_distance = kpis.travel_distance.delta();
+            segment.max_velocity = kpis.velocity.max();
+            segment.avg_velocity = kpis.velocity.mean();
+        }
+    }
 }
 
 fn write_summary(output: &Path, reports: &[RecordingReport]) -> Result<()> {
     let fd = fs::File::create(output).context(format!("Could not create {}", output.display()))?;
     serde_json::to_writer_pretty(fd, reports).context("Failed to serialize segment reports")?;
     Ok(())
-}
-
-struct DrivingSegmentTracker {
-    segments: Vec<DrivingSegment>,
-    was_driving: Option<bool>,
-}
-
-impl DrivingSegmentTracker {
-    pub fn new() -> Self {
-        Self {
-            segments: Vec::new(),
-            was_driving: None,
-        }
-    }
-
-    pub fn observe(&mut self, timestamp: DateTime<Utc>, state: u8) -> () {
-        match (self.was_driving, state) {
-            (None, 3) => {
-                self.segments.push(DrivingSegment {
-                    start: timestamp,
-                    end: timestamp,
-                    start_truncated: true,
-                    end_truncated: true,
-                    successful: false,
-                });
-            }
-            (Some(false), 3) => {
-                self.segments.push(DrivingSegment {
-                    start: timestamp,
-                    end: timestamp,
-                    start_truncated: false,
-                    end_truncated: true,
-                    successful: false,
-                });
-            }
-            (Some(true), 3) => {
-                if let Some(segment) = self.segments.last_mut() {
-                    segment.end = timestamp;
-                }
-            }
-            (Some(true), 1) | (Some(true), 2) | (Some(true), 4) => {
-                if let Some(segment) = self.segments.last_mut() {
-                    segment.end = timestamp;
-                    segment.end_truncated = false;
-                }
-            }
-            (Some(true), 5) => {
-                if let Some(segment) = self.segments.last_mut() {
-                    segment.end = timestamp;
-                    segment.end_truncated = false;
-                    segment.successful = true;
-                }
-            }
-            _ => (),
-        }
-
-        self.was_driving = Some(state == 3);
-    }
-
-    pub fn finalize(self) -> Vec<DrivingSegment> {
-        self.segments
-    }
 }

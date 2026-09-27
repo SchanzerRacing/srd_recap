@@ -8,6 +8,7 @@ mod cli;
 mod commands;
 mod utils;
 mod mcap_cli;
+mod tracking;
 
 pub enum CommandOutcome {
     Success,
